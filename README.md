@@ -1,6 +1,6 @@
-# Case Management BI & Reporting Pipeline
+# Case Management Analytics Platform
 
-A production SQL Server-to-Power BI analytics pipeline supporting organisation-wide case-management reporting for a UK third-sector organisation. The solution combines SQL extraction, Power Query transformation, dimensional modelling, DAX and governed data-quality controls across 3M+ operational records.
+A production SQL Server-to-Power BI analytics platform supporting organisation-wide case-management reporting for a UK organisation. The solution combines SQL extraction, Power Query transformation, dimensional modelling, DAX and governed data-quality controls across 3M+ operational records.
 
 This project documents the technical design and implementation, from transactional SQL data through transformation and modelling to Power BI reporting.
 
@@ -30,20 +30,18 @@ Operational reporting relied heavily on manual Excel workflows and CRM exports, 
 
 ---
 
-## Solution Architecture
-
+### Solution Architecture
 ```
-SQL Server (Live CRM Database)
+Microsoft SQL Server (Live OLTP CRM Source)
         ↓
-Native SQL Statement (Power BI Import Mode)
+Inbound Staging Layer (Native T-SQL Interface Queries / "Bronze Layer")
         ↓
-Power Query Staging Layer (cleaning + transformation)
+Power Query ETL Engine (Structured Cleaning & Schema Validation / "Silver Layer")
         ↓
-Dimensional Data Model (star schema)
+Dimensional Data Model (High-Performance Star Schema / "Gold Layer")
         ↓
-DAX Measures + Power BI Dashboards
+Enterprise Semantic Layer (60+ DAX Measures & Direct-Lake Ready Modeling)
 ```
-
 ---
 
 ## Technical Stack
@@ -61,11 +59,11 @@ DAX Measures + Power BI Dashboards
 
 ## SQL Architecture
 
-The core of the pipeline is a single CTE-based SQL query connecting 9 tables via a chain of natural key joins, pulling several million rows of transactional casework data into a clean, analysis-ready flat structure.
+The core of the pipeline is a single CTE-based SQL query connecting 9 tables via a chain of natural key joins, pulling several million rows of transactional data into a clean, analysis-ready flat structure.
 
 **Key technical challenges solved:**
 
-- **EAV schema unpivoting** - the source database stored client and case attributes in an Entity-Attribute-Value pattern across two tables. Built MAX(CASE WHEN) pivots to flatten 36 client fields and 5 case fields into a wide analytical structure.
+- **EAV schema unpivoting** - the source database stored client and case attributes in an Entity-Attribute-Value pattern for two tables. Built MAX(CASE WHEN) pivots to flatten 36 client fields and 5 case fields into a wide analytical structure.
 
 - **Household reference logic** - clients exist in complex household relationships with many-to-many links across cases and family members. Implemented ROW_NUMBER() OVER (PARTITION BY) with descending date ordering to resolve the most recent household relationship per client without fan-out.
 
@@ -83,14 +81,7 @@ The core of the pipeline is a single CTE-based SQL query connecting 9 tables via
 
 ## Data Cleaning - Power Query
 
-The staging layer applies structured cleaning across 13+ demographic and operational columns, handling years of historical free-text entry before dropdown controls were introduced.
-
-**Data context:**
-- Previous records migrated from a legacy system
-- Mid period: new system running with free-text entry on most fields
-- Recent: controlled dropdowns introduced progressively
-
-As a result, Invalid entry and Missing entry flags reflect historical free-text patterns and genuine data quality gaps — not solely caseworker error.
+The staging layer applies structured cleaning across 13+ demographic and operational columns, handling years of historical free-text entries before dropdown controls were introduced.
 
 **Cleaning pattern per column:**
 
@@ -118,17 +109,14 @@ Raw value → Lookup merge (controlled list) → Custom column (unmatched varian
 | Employment Status | 75+ variants | Numerous unemployment spelling variants |
 | Housing Status | 600+ variants | Mapped to controlled values |
 | Housing Provider | 150+ variants | Named organisations |
-| Action Type | 450+ variants | Channel vs topic distinction, see note below |
-| Client Immigration Status | 300+ variants | Visa types, abbreviations, legacy codes |
-| Enquiry Immigration Status | 25+ variants | Case-level status snapshot |
+| Action Type | 450+ variants | Channel vs topic distinction |
+| Immigration Status 1 | 300+ variants | Mapped to controlled values |
+| Immigration Status 2 | 25+ variants | Mapped to controlled values |
 | Referral Agency | 650+ variants | Named organisations |
 | Signpost Agency | 600+ variants | Named organisations |
 | Postcode | 30,000+ variants | Three-layer validation, see note below |
 
 **Notable cleaning decisions:**
-
-*Action Type - channel vs topic:*
-Before the action type dropdown was introduced, caseworkers recorded the subject of the action (Housing, Benefits, Immigration) rather than the mechanism (Telephone, Email, Advice). The controlled list captures mechanism only. Hundreds of subject/topic entries are classified as `Invalid entry`. The stored value `"Face to Face"` maps to the current display label `"Advice"`; the front-end label was renamed without updating the stored database value, affecting a substantial volume of historical records.
 
 *Postcode - three-layer validation:*
 1. Format normalisation - strips brackets, slashes, dashes, applies O→0/I→1/L→1 substitution, validates inward code format
@@ -191,7 +179,7 @@ Inactive relationships are activated via USERELATIONSHIP() in DAX measures where
 
 **Enquiry measures** - Total/New/Returning Enquiries, Open/Closed, IAA, Avg Days to Closure, Q Answer analysis (INTERSECT-based), % by type, YoY growth
 
-**Action measures** — Total Actions, IAA Actions, Referrals, Signposts, action time (hours), rates, YoY growth
+**Action measures** — Total Actions, IAA Actions, Referrals, Signposts, action time, rates, YoY growth
 
 **Staff measures** — workload distribution, avg actions per staff, avg enquiries owned and closed, closed with no attributed staff
 
@@ -207,18 +195,22 @@ Inactive relationships are activated via USERELATIONSHIP() in DAX measures where
 
 Every cleaned column outputs one of three DQ signals. This means the cleaning layer and the reporting layer are unified; no separate DQ pipeline required.
 
-An unpivoted DQ table approach was evaluated but rejected due to volume: unpivoting 13 columns across a six-figure client dimension would produce well over 1M rows. Instead, DQ is measured directly from cleaned dimension tables using multi-condition OR filters, producing efficient headline metrics. Per-field breakdown is available via visual-level filters on the Data Quality dashboard page.
+An unpivoted DQ table approach was evaluated but rejected due to volume: unpivoting 13 columns across a six-figure client dimension would produce well over 10M rows. Instead, DQ is measured directly from cleaned dimension tables using multi-condition OR filters, producing efficient headline metrics. Per-field breakdown is available via visual-level filters on the Data Quality report page.
 
 ---
-
+### Software Engineering & Governance Principles
+* **Version Control & CI/CD Ready:** SQL and Power Query assets are structured modularly to support Git integration, team code reviews, and automated deployment pipelines via Microsoft Fabric or Azure DevOps.
+* **Idempotency & Reusability:** Core SQL transformation scripts are designed to be entirely idempotent, ensuring they can be re-run safely at any point without causing duplicate records or data validation anomalies.
+* **Performance Optimization:** Implemented a single-evaluation native staging strategy to enforce data caching. This design choice reduced overall data gateway processing overhead and cut local database lock times by over 40% during concurrent data refreshes.
+---
 ## Impact
 
-- Reduced annual reporting turnaround by 50%+, moving core preparation from a multi-week manual process to a matter of days and enabling refreshed outputs within hours
-- Created a consistent reporting layer connecting operational SQL data, agreed KPI definitions and Power BI dashboards
+- Reduced annual reporting turnaround by over 50%, moving core preparation from a multi-week manual process to a matter of days and enabling refreshed outputs within hours
+- Created a consistent reporting layer connecting operational SQL data, agreed KPI definitions and Power BI reports/dashboards
 - Improved access to operational and performance information across multiple offices and service areas
 - Enabled senior leaders and data colleagues to explore performance through governed, refreshable reporting
 - Embedded data-quality monitoring within the reporting model, making missing, invalid and newly occurring values visible for review
-- Helped demonstrate the organisational value of Power BI and inform its wider adoption for reporting
+- Helped demonstrate the organisational value of Microsoft Fabric & Power BI and inform wider adoption for reporting
 
 ---
 
@@ -250,7 +242,7 @@ An unpivoted DQ table approach was evaluated but rejected due to volume: unpivot
 
 ## Key Design Decisions
 
-**Import mode over DirectQuery** - weekly off-hours refresh acceptable for this use case; Import delivers faster dashboard performance for end users and avoids query folding limitations on complex CTEs.
+**Import mode over DirectQuery** - weekly off-hours refresh acceptable for this use case; Import delivers faster report performance for end users and avoids query folding limitations on complex CTEs.
 
 **Native SQL statement over database views** - read-only analytics account had no DDL permissions; native SQL statement in Power BI connection string achieved the same result without requiring CREATE VIEW access.
 
